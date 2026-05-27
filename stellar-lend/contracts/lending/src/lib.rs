@@ -2,10 +2,16 @@
 
 pub mod rounding_strategy;
 
+mod debt;
+
+#[cfg(test)]
+extern crate std;
+
 #[cfg(test)]
 mod interest_drift_regression_test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, Env, Symbol, Bytes};
+use crate::debt::{load_debt, save_debt, repay_amount, DEFAULT_APR_BPS, DebtPosition, effective_debt};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +25,8 @@ pub struct PositionSummary {
 #[repr(u32)]
 pub enum LendingError {
     BelowMinimumBorrow = 1008,
+    NotInitialized = 1009,
+    AlreadyInitialized = 1010,
 }
 
 #[contract]
@@ -26,19 +34,30 @@ pub struct LendingContract;
 
 #[contractimpl]
 impl LendingContract {
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), LendingError> {
+        // Prevent double-initialization: return a typed error if already initialized.
+        if env.storage().instance().get::<_, Address>(&"admin").is_some() {
+            return Err(LendingError::AlreadyInitialized);
+        }
         env.storage().instance().set(&"admin", &admin);
+        Ok(())
     }
 
-    pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().get(&"admin").unwrap()
+    /// Return the stored admin address or a typed `LendingError::NotInitialized` if
+    /// the contract has not been initialized yet.
+    pub fn get_admin(env: Env) -> Result<Address, LendingError> {
+        match env.storage().instance().get::<_, Address>(&"admin") {
+            Some(a) => Ok(a),
+            None => Err(LendingError::NotInitialized),
+        }
     }
 
     /// Set the minimum borrow amount (admin-only).
-    pub fn set_min_borrow(env: Env, min_borrow: i128) {
-        let admin = Self::get_admin(env.clone());
+    pub fn set_min_borrow(env: Env, min_borrow: i128) -> Result<(), LendingError> {
+        let admin = Self::get_admin(env.clone())?;
         admin.require_auth();
         env.storage().instance().set(&Symbol::new(&env, "BorrowMinAmount"), &min_borrow);
+        Ok(())
     }
 
     /// Get the minimum borrow amount.
@@ -112,9 +131,9 @@ impl LendingContract {
     }
 
     // Flash loan fee setter (bps). Only admin may call.
-    pub fn set_flash_loan_fee_bps(env: Env, admin: Address, fee_bps: i128) {
+    pub fn set_flash_loan_fee_bps(env: Env, admin: Address, fee_bps: i128) -> Result<(), LendingError> {
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&"admin").unwrap();
+        let stored_admin = Self::get_admin(env.clone())?;
         if stored_admin != admin {
             panic!("Unauthorized");
         }
@@ -123,6 +142,7 @@ impl LendingContract {
             panic!("InvalidFeeBps");
         }
         env.storage().instance().set(&"flash_fee_bps", &fee_bps);
+        Ok(())
     }
 
     fn get_flash_fee_bps(env: &Env) -> i128 {
@@ -132,7 +152,7 @@ impl LendingContract {
     // Repay function used by receiver during callback to return funds to the contract.
     pub fn repay_flash_loan(env: Env, asset: Address, amount: i128) {
         // Payer must be the invoker (caller contract/account)
-        let payer = env.invoker();
+        let payer = Env::invoker(&env);
         payer.require_auth();
         // subtract from payer balance
         let payer_key = ("bal", asset.clone(), payer.clone());
@@ -182,7 +202,7 @@ impl LendingContract {
         // invoke receiver callback: on_flash_loan(initiator, asset, amount, fee, params)
         let method = Symbol::new(&env, "on_flash_loan");
         // Prepare arguments: initiator = caller (invoker)
-        let initiator = env.invoker();
+        let initiator = Env::invoker(&env);
         // Call contract - if it panics, propagate
         env.invoke_contract(&receiver, &method, (initiator.clone(), asset.clone(), amount, fee, params));
 
@@ -319,7 +339,31 @@ mod test {
         client.set_min_borrow(&100);
         assert_eq!(client.get_min_borrow(), 100);
     }
+
+    #[test]
+    fn test_get_admin_before_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(LendingContract, ());
+        let client = LendingContractClient::new(&env, &id);
+        // contract not initialized, try_get_admin should return an error
+        let res = client.try_get_admin();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_double_initialize_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(LendingContract, ());
+        let client = LendingContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        // first initialize should succeed
+        client.initialize(&admin);
+        // second initialize should return an error
+        let res = client.try_initialize(&admin);
+        assert!(res.is_err());
+    }
 }
 
-#[cfg(test)]
-mod interest_drift_regression_test;
+

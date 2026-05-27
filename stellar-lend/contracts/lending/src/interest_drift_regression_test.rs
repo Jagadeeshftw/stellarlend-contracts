@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod interest_drift_regression_tests {
     use super::*;
+    use std::println;
     use crate::rounding_strategy::{
         calculate_interest_with_rounding, RoundingMode, SECONDS_PER_YEAR,
     };
