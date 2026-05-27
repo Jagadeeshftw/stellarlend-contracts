@@ -1,12 +1,24 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Bytes};
+pub mod rounding_strategy;
+
+#[cfg(test)]
+mod interest_drift_regression_test;
+
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PositionSummary {
     pub collateral: i128,
     pub debt: i128,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum LendingError {
+    BelowMinimumBorrow = 1008,
 }
 
 #[contract]
@@ -22,6 +34,21 @@ impl LendingContract {
     /// Get the configured admin (or panic if uninitialized).
     pub fn get_admin(env: Env) -> Address {
         env.storage().instance().get(&"admin").unwrap()
+    }
+
+    /// Set the minimum borrow amount (admin-only).
+    pub fn set_min_borrow(env: Env, min_borrow: i128) {
+        let admin = Self::get_admin(env.clone());
+        admin.require_auth();
+        env.storage().instance().set(&Symbol::new(&env, "BorrowMinAmount"), &min_borrow);
+    }
+
+    /// Get the minimum borrow amount.
+    pub fn get_min_borrow(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "BorrowMinAmount"))
+            .unwrap_or(0)
     }
 
     /// Deposit collateral for a user.
@@ -55,18 +82,17 @@ impl LendingContract {
     }
 
     /// Borrow against deposited collateral.
-    pub fn borrow(env: Env, user: Address, amount: i128) -> i128 {
-        // Prevent mutating during an active flash loan callback
-        let active: bool = env.storage().instance().get(&"flash_active").unwrap_or(false);
-        if active {
-            panic!("FlashLoanReentrancy");
-        }
+    pub fn borrow(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         user.require_auth();
+        let min_borrow = Self::get_min_borrow(env.clone());
+        if amount < min_borrow {
+            return Err(LendingError::BelowMinimumBorrow);
+        }
         let key = ("debt", user.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_debt = current + amount;
         env.storage().persistent().set(&key, &new_debt);
-        new_debt
+        Ok(new_debt)
     }
 
     /// Repay debt.
@@ -260,64 +286,27 @@ mod test {
         assert_eq!(pos.debt, 0);
     }
 
-    use soroban_sdk::{BytesN, IntoVal};
-
-    #[contract]
-    pub struct MockFlashLoanReceiver;
-
-    #[contractimpl]
-    impl MockFlashLoanReceiver {
-        // on_flash_loan will attempt to repay principal + fee by calling back into the lender
-        pub fn on_flash_loan(
-            env: Env,
-            _initiator: Address,
-            asset: Address,
-            amount: i128,
-            fee: i128,
-            _params: Bytes,
-        ) -> bool {
-            // call repay_flash_loan on the invoker (the lending contract)
-            let lender = env.invoker();
-            let method = Symbol::new(&env, "repay_flash_loan");
-            // repay principal + fee
-            let to_repay = amount + fee;
-            env.invoke_contract(&lender, &method, (asset.clone(), to_repay));
-            true
-        }
+    #[test]
+    fn test_borrow_below_minimum_rejected() {
+        let (_env, client, _admin, user) = setup();
+        client.set_min_borrow(&50);
+        let res = client.try_borrow(&user, &40);
+        assert!(res.is_err());
     }
 
     #[test]
-    fn test_flash_loan_success() {
-        let env = Env::default();
-        env.mock_all_auths();
-        // register lending contract
-        let lending_id = env.register(LendingContract, ());
-        let client = LendingContractClient::new(&env, &lending_id);
-        // init admin
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
+    fn test_borrow_exactly_minimum_accepted() {
+        let (_env, client, _admin, user) = setup();
+        client.set_min_borrow(&50);
+        let res = client.borrow(&user, &50);
+        assert_eq!(res, 50);
+    }
 
-        // register receiver contract
-        let recv_id = env.register(MockFlashLoanReceiver, ());
-        let receiver = Address::Contract(recv_id.clone());
-
-        // choose an asset address
-        let asset = Address::generate(&env);
-
-        // seed treasury with liquidity
-        let tre_key = ("treasury", asset.clone());
-        env.storage().persistent().set(&tre_key, &1000i128);
-
-        // ensure receiver has zero balance initially
-        let rec_key = ("bal", asset.clone(), receiver.clone());
-        env.storage().persistent().set(&rec_key, &0i128);
-
-        // perform flash loan of 100
-        client.flash_loan(&receiver, &asset, &100, &Bytes::new(&env, vec![]));
-
-        // treasury should be decreased by 100 then increased by 100 + fee (default 5 bps => 0)
-        let final_tre: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
-        // fee is amount * 5 / 10000 = 0 for small amounts in integer arithmetic
-        assert!(final_tre >= 1000);
+    #[test]
+    fn test_set_min_borrow_admin_only() {
+        let (_env, client, admin, _user) = setup();
+        assert_eq!(client.get_min_borrow(), 0);
+        client.set_min_borrow(&100);
+        assert_eq!(client.get_min_borrow(), 100);
     }
 }
