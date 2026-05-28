@@ -294,43 +294,34 @@ mod test {
     #[test]
     fn test_deposit_increases_balance() {
         let (_env, client, _admin, user) = setup();
-        let result = client.deposit(&user, &100);
-        assert_eq!(result, 100);
-        let again = client.deposit(&user, &50);
-        assert_eq!(again, 150);
+        assert_eq!(client.deposit(&user, &100), 100);
+        assert_eq!(client.deposit(&user, &50), 150);
     }
 
     #[test]
     fn test_withdraw_decreases_balance() {
         let (_env, client, _admin, user) = setup();
         client.deposit(&user, &100);
-        let result = client.withdraw(&user, &40);
-        assert_eq!(result, 60);
-    }
-
-    #[test]
-    fn test_borrow_increases_debt() {
-        let (_env, client, _admin, user) = setup();
-        let result = client.borrow(&user, &50);
-        assert_eq!(result, 50);
+        assert_eq!(client.withdraw(&user, &40), 60);
     }
 
     #[test]
     fn test_repay_decreases_debt() {
         let (_env, client, _admin, user) = setup();
-        client.borrow(&user, &100);
-        let result = client.repay(&user, &30);
-        assert_eq!(result, 70);
+        // Deposit enough collateral first (150 % of 100 = 150).
+        client.deposit(&user, &150);
+        client.borrow(&user, &100).unwrap();
+        assert_eq!(client.repay(&user, &30), 70);
     }
 
     #[test]
     fn test_position_summary_reflects_state() {
         let (_env, client, _admin, user) = setup();
-        client.deposit(&user, &200);
-        client.borrow(&user, &75);
+        client.deposit(&user, &300);
+        client.borrow(&user, &100).unwrap(); // 300/100 = 300 % ≥ 150 %
         let pos = client.get_position(&user);
-        assert_eq!(pos.collateral, 200);
-        assert_eq!(pos.debt, 75);
+        assert_eq!(pos.collateral, 300);
+        assert_eq!(pos.debt, 100);
     }
 
     #[test]
