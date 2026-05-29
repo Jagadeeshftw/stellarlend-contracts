@@ -6,8 +6,11 @@ pub mod rounding_strategy;
 #[cfg(test)]
 mod interest_drift_regression_test;
 
+use debt::{
+    borrow_amount, effective_debt, load_debt, repay_amount, save_debt, DebtPosition,
+    DEFAULT_APR_BPS,
+};
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Symbol};
-use debt::{borrow_amount, load_debt, save_debt, DebtPosition, DEFAULT_APR_BPS, repay_amount, effective_debt};
 
 /// Maximum desired persistent TTL for position entries, in ledgers.
 /// We bound the extension by the network's `max_ttl` to remain compatible

@@ -189,7 +189,7 @@ pub fn reconcile_debt_with_drift_correction(
     freshly_calculated_debt: i128,
     accumulated_drift: i128,
     max_allowed_drift_bps: i128, // e.g., 10 = 0.1% max drift
-)-> Result<(i128, i128), RoundingError> {
+) -> Result<(i128, i128), RoundingError> {
     // Calculate the drift in basis points
     let debt_basis = if stored_debt > 0 {
         (freshly_calculated_debt - stored_debt) * 10000 / stored_debt

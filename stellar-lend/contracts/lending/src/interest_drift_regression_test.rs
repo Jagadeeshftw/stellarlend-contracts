@@ -5,11 +5,10 @@
 #[cfg(test)]
 mod interest_drift_regression_tests {
     use super::*;
-    use std::println;
     use crate::rounding_strategy::{
         calculate_interest_with_rounding, RoundingMode, SECONDS_PER_YEAR,
     };
-    use soroban_sdk::{Env, log};
+    use soroban_sdk::{log, Env};
 
     /// ✅ Test: 24-month accrual with banker's rounding shows bounded drift
     #[test]
