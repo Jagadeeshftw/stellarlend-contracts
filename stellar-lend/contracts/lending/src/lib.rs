@@ -1,11 +1,18 @@
 #![no_std]
 
 pub mod rounding_strategy;
+mod debt;
 
 #[cfg(test)]
 mod interest_drift_regression_test;
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, Symbol};
+use debt::{borrow_amount, load_debt, save_debt, DebtPosition, DEFAULT_APR_BPS, repay_amount, effective_debt};
+
+/// Maximum desired persistent TTL for position entries, in ledgers.
+/// We bound the extension by the network's `max_ttl` to remain compatible
+/// with runtime limits while keeping active positions alive for a long window.
+const PERSISTENT_TTL_LEDGERS: u32 = 1_000_000;
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +30,22 @@ pub enum LendingError {
 
 #[contract]
 pub struct LendingContract;
+
+/// Helper function to extend TTL for collateral entries
+/// Prevents collateral data from being archived during the TTL period
+fn extend_collateral_ttl(env: &Env, user: &Address) {
+    let key = ("col", user.clone());
+    let ttl = env.storage().max_ttl().min(PERSISTENT_TTL_LEDGERS);
+    env.storage().persistent().extend_ttl(&key, ttl, ttl);
+}
+
+/// Helper function to extend TTL for debt entries
+/// Prevents debt data from being archived during the TTL period
+fn extend_debt_ttl(env: &Env, user: &Address) {
+    let key = ("debt", user.clone());
+    let ttl = env.storage().max_ttl().min(PERSISTENT_TTL_LEDGERS);
+    env.storage().persistent().extend_ttl(&key, ttl, ttl);
+}
 
 #[contractimpl]
 impl LendingContract {
@@ -61,6 +84,8 @@ impl LendingContract {
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_balance = current + amount;
         env.storage().persistent().set(&key, &new_balance);
+        // Extend TTL to prevent archival of collateral entry
+        extend_collateral_ttl(&env, &user);
         new_balance
     }
 
@@ -75,6 +100,8 @@ impl LendingContract {
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_balance = current - amount;
         env.storage().persistent().set(&key, &new_balance);
+        // Extend TTL to prevent archival of collateral entry
+        extend_collateral_ttl(&env, &user);
         new_balance
     }
 
@@ -85,11 +112,14 @@ impl LendingContract {
         if amount < min_borrow {
             return Err(LendingError::BelowMinimumBorrow);
         }
-        let key = ("debt", user.clone());
-        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        let new_debt = current + amount;
-        env.storage().persistent().set(&key, &new_debt);
-        Ok(new_debt)
+        let now = env.ledger().timestamp();
+        let position = load_debt(&env, &user);
+        let updated = borrow_amount(position, now, amount, DEFAULT_APR_BPS)
+            .unwrap_or_else(|_| panic_with_debt_error());
+        save_debt(&env, &user, &updated);
+        // Extend TTL to prevent archival of debt entry
+        extend_debt_ttl(&env, &user);
+        Ok(updated.principal)
     }
 
     pub fn repay(env: Env, user: Address, amount: i128) -> i128 {
@@ -104,11 +134,16 @@ impl LendingContract {
         let updated = repay_amount(position, now, amount, DEFAULT_APR_BPS)
             .unwrap_or_else(|_| panic_with_debt_error());
         save_debt(&env, &user, &updated);
+        extend_debt_ttl(&env, &user);
         updated.principal
     }
 
     pub fn get_debt_position(env: Env, user: Address) -> DebtPosition {
-        load_debt(&env, &user)
+        let position = load_debt(&env, &user);
+        if position.principal != 0 {
+            extend_debt_ttl(&env, &user);
+        }
+        position
     }
 
     // Flash loan fee setter (bps). Only admin may call.
@@ -198,12 +233,15 @@ impl LendingContract {
 
     /// Get the user's current position summary.
     pub fn get_position(env: Env, user: Address) -> PositionSummary {
-        let col: i128 = env
-            .storage()
-            .persistent()
-            .get(&("col", user.clone()))
-            .unwrap_or(0);
+        let col_key = ("col", user.clone());
+        let col: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
+        if col != 0 {
+            extend_collateral_ttl(&env, &user);
+        }
         let position = load_debt(&env, &user);
+        if position.principal != 0 {
+            extend_debt_ttl(&env, &user);
+        }
         let debt = effective_debt(&position, env.ledger().timestamp(), DEFAULT_APR_BPS)
             .unwrap_or(position.principal);
         PositionSummary {
@@ -236,7 +274,7 @@ mod test {
     fn advance_time(env: &Env, seconds: u64) {
         let mut li = env.ledger().get();
         li.timestamp = li.timestamp.saturating_add(seconds);
-        li.sequence_number = li.sequence_number.saturating_add(1);
+        li.sequence_number = li.sequence_number.saturating_add(seconds);
         env.ledger().set(li);
     }
 
@@ -286,6 +324,39 @@ mod test {
         let pos = client.get_position(&user);
         assert_eq!(pos.collateral, 200);
         assert_eq!(pos.debt, 75);
+    }
+
+    #[test]
+    fn test_ttl_keeps_position_live_across_reads() {
+        let (env, client, _admin, user) = setup();
+        client.deposit(&user, &200);
+        client.borrow(&user, &75);
+
+        // Move time to the middle of the TTL window and read the position.
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2) as u64);
+        let pos_mid = client.get_position(&user);
+        assert_eq!(pos_mid.collateral, 200);
+        assert_eq!(pos_mid.debt, 75);
+
+        // Advance past the original TTL boundary. The previous read should have extended TTL.
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2 + 1) as u64);
+        let pos_after = client.get_position(&user);
+        assert_eq!(pos_after.collateral, 200);
+        assert_eq!(pos_after.debt, 75);
+    }
+
+    #[test]
+    fn test_get_debt_position_extends_debt_ttl() {
+        let (env, client, _admin, user) = setup();
+        client.borrow(&user, &100);
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2) as u64);
+        let debt_mid = client.get_debt_position(&user);
+        assert_eq!(debt_mid.principal, 100);
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2 + 1) as u64);
+        let debt_after = client.get_debt_position(&user);
+        assert_eq!(debt_after.principal, 100);
     }
 
     #[test]

@@ -10,6 +10,27 @@ All keys are defined using `contracttype` enums.
 > [!IMPORTANT]
 > **Namespace Isolation**: To prevent collisions between modules, all storage key enum variants MUST be unique across the entire contract. Even different enum types will collide if their variants share the same name (as they serialize to the same `Symbol`).
 
+## Persistent TTL Policy
+
+To keep user positions readable, the lending contract now extends the TTL for the two position-specific persistent entries:
+
+- `("col", user)` — collateral balance
+- `("debt", user)` — debt position record
+
+The policy is:
+
+- `deposit`, `withdraw`, `borrow`, and `repay` extend TTL on the corresponding `col` or `debt` entry when the position changes.
+- `get_position` extends TTL for an existing collateral entry and existing debt entry during a position read.
+- `get_debt_position` extends TTL for an existing debt entry during a debt-only read.
+
+This design keeps actively used positions live while limiting extra gas cost to the small set of position read/write entrypoints.
+
+### Gas trade-offs
+
+- Write-side TTL bumps are the primary mechanism and add a small storage extension cost to each position-changing call.
+- Read-side TTL bumps are only applied on explicit position queries, which preserves liveness for read-heavy users without imposing additional fees on unrelated contract calls.
+- The TTL is long-lived (up to 1,000,000 ledgers or the network maximum), so routine use keeps positions live and infrequent inactive positions are not constantly bumped.
+
 ## Storage Map
 
 ### 1. Cross-Asset Core (`cross_asset.rs`)
