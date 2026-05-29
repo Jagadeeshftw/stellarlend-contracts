@@ -2,7 +2,6 @@
 
 mod debt;
 pub mod rounding_strategy;
-mod debt;
 
 #[cfg(test)]
 mod interest_drift_regression_test;
@@ -14,6 +13,8 @@ use debt::{borrow_amount, load_debt, save_debt, DebtPosition, DEFAULT_APR_BPS, r
 /// We bound the extension by the network's `max_ttl` to remain compatible
 /// with runtime limits while keeping active positions alive for a long window.
 const PERSISTENT_TTL_LEDGERS: u32 = 1_000_000;
+const DEFAULT_DEPOSIT_CAP: i128 = 1_000_000_000_000_000_000;
+const REENTRANCY_LOCK_KEY: &str = "reentrancy_lock";
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,9 +27,13 @@ pub enum DataKey {
     TotalDeposits,
     DebtCeiling,
     DepositCap,
+    Admin,
+    Guardian,
+    PendingAdmin,
+    BorrowMinAmount,
     FlashActive,
     FlashFeeBps,
-    BorrowMinAmount,
+    EmergencyState,
 }
 
 fn acquire_reentrancy_lock(env: &Env) {
@@ -52,16 +57,6 @@ fn with_reentrancy_lock<T>(env: &Env, f: impl FnOnce() -> T) -> T {
     let result = f();
     release_reentrancy_lock(env);
     result
-}
-
-#[contracttype]
-pub enum DataKey {
-    Admin,
-    EmergencyState,
-    Guardian,
-    BorrowMinAmount,
-    FlashActive,
-    FlashFeeBps,
 }
 
 #[contracttype]
@@ -94,12 +89,14 @@ pub enum Error {
     BelowMinimumBorrow = 1008,
     NotInitialized = 1009,
     AlreadyInitialized = 1010,
+    PositionHealthy = 1011,
 }
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum LendingError {
+    InvalidAmount = 1004,
     BelowMinimumBorrow = 1008,
     NotInitialized = 1009,
     AlreadyInitialized = 1010,
@@ -114,20 +111,11 @@ pub struct LendingContract;
 #[contractimpl]
 impl LendingContract {
     pub fn initialize(env: Env, admin: Address) {
-<<<<<<< HEAD
-        if env.storage().instance().has(&"admin") {
+        if env.storage().instance().has(&DataKey::Admin) {
             panic!("AlreadyInitialized");
         }
-        env.storage().instance().set(&"admin", &admin);
-        // initialize emergency state to Normal
-        env.storage().instance().set(
-            &Symbol::new(&env, "EmergencyState"),
-            &EmergencyState::Normal,
-        );
-=======
         env.storage().instance().set(&DataKey::Admin, &admin);
         set_emergency_state_internal(&env, EmergencyState::Normal);
->>>>>>> f6bcee0 (feat: complete global emergency circuit breaker and unify instance storage hooks #831)
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -154,6 +142,7 @@ impl LendingContract {
         let admin = Self::get_admin(env.clone())?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::BorrowMinAmount, &min_borrow);
+        Ok(())
     }
 
     /// Get the minimum borrow amount.
@@ -162,8 +151,13 @@ impl LendingContract {
     }
 
     /// Deposit collateral for a user.
-    pub fn deposit(env: Env, user: Address, amount: i128) -> i128 {
+    pub fn deposit(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         check_emergency_status(&env, ProtocolAction::Deposit);
+
+        if amount <= 0 {
+            return Err(LendingError::InvalidAmount);
+        }
+
         // Prevent mutating during an active flash loan callback
         let active: bool = env
             .storage()
@@ -191,13 +185,18 @@ impl LendingContract {
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let new_balance = current.checked_add(amount).ok_or(LendingError::Overflow)?;
         env.storage().persistent().set(&key, &new_balance);
+        env.storage().persistent().set(&DataKey::TotalDeposits, &new_total);
         // Extend TTL to prevent archival of collateral entry
         extend_collateral_ttl(&env, &user);
-        new_balance
+        Ok(new_balance)
     }
 
-    pub fn withdraw(env: Env, user: Address, amount: i128) -> i128 {
+    pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         check_emergency_status(&env, ProtocolAction::Withdraw);
+
+        if amount <= 0 {
+            return Err(LendingError::InvalidAmount);
+        }
 
         // Prevent mutating during an active flash loan callback
         let active: bool = env
@@ -218,7 +217,7 @@ impl LendingContract {
         env.storage().persistent().set(&key, &new_balance);
         // Extend TTL to prevent archival of collateral entry
         extend_collateral_ttl(&env, &user);
-        new_balance
+        Ok(new_balance)
     }
 
     /// Borrow against deposited collateral. Enforces protocol-level debt ceiling.
@@ -243,6 +242,10 @@ impl LendingContract {
     pub fn borrow(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         check_emergency_status(&env, ProtocolAction::Borrow);
 
+        if amount <= 0 {
+            return Err(LendingError::InvalidAmount);
+        }
+
         user.require_auth();
         let min_borrow = Self::get_min_borrow(env.clone());
         if amount < min_borrow {
@@ -251,7 +254,10 @@ impl LendingContract {
         let now = env.ledger().timestamp();
         let position = load_debt(&env, &user);
         let updated = borrow_amount(position, now, amount, DEFAULT_APR_BPS)
-            .unwrap_or_else(|_| panic_with_debt_error());
+            .map_err(|e| match e {
+                debt::DebtError::InvalidAmount => LendingError::InvalidAmount,
+                debt::DebtError::Overflow => LendingError::Overflow,
+            })?;
         save_debt(&env, &user, &updated);
         // Extend TTL to prevent archival of debt entry
         extend_debt_ttl(&env, &user);
@@ -307,8 +313,14 @@ impl LendingContract {
         Ok(actual_repay)
     }
 
-    pub fn repay(env: Env, user: Address, amount: i128) -> i128 {
+    /// Repay user debt, clamping overpayment to zero.
+    /// Returns the remaining debt principal after the repay.
+    pub fn repay(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         check_emergency_status(&env, ProtocolAction::Repay);
+
+        if amount <= 0 {
+            return Err(LendingError::InvalidAmount);
+        }
 
         // Prevent mutating during an active flash loan callback
         let active: bool = env
@@ -323,10 +335,13 @@ impl LendingContract {
         let now = env.ledger().timestamp();
         let position = load_debt(&env, &user);
         let updated = repay_amount(position, now, amount, DEFAULT_APR_BPS)
-            .map_err(|_| LendingError::Overflow)?;
+            .map_err(|e| match e {
+                debt::DebtError::InvalidAmount => LendingError::InvalidAmount,
+                debt::DebtError::Overflow => LendingError::Overflow,
+            })?;
         save_debt(&env, &user, &updated);
         extend_debt_ttl(&env, &user);
-        updated.principal
+        Ok(updated.principal)
     }
 
     pub fn get_debt_position(env: Env, user: Address) -> DebtPosition {
@@ -341,15 +356,8 @@ impl LendingContract {
     pub fn set_debt_ceiling(env: Env, ceiling: i128) -> Result<(), LendingError> {
         let admin = Self::get_admin(env.clone())?;
         admin.require_auth();
-        let stored_admin = Self::get_admin(env.clone());
-        if stored_admin != admin {
-            panic!("Unauthorized");
-        }
-        const MAX_FEE: i128 = 1000;
-        if !(0..=MAX_FEE).contains(&fee_bps) {
-            panic!("InvalidFeeBps");
-        }
-        env.storage().instance().set(&DataKey::FlashFeeBps, &fee_bps);
+        env.storage().persistent().set(&DataKey::DebtCeiling, &ceiling);
+        Ok(())
     }
 
     /// Privileged function to update the global emergency state. Only callable by `admin` or `guardian`.
@@ -444,12 +452,8 @@ impl LendingContract {
             (initiator.clone(), asset.clone(), amount, fee, params).into_val(&env),
         );
 
-<<<<<<< HEAD
-        env.storage().instance().set(&"flash_active", &false);
-=======
         // clear reentrancy guard before checks to ensure state is readable
         env.storage().instance().set(&DataKey::FlashActive, &false);
->>>>>>> f6bcee0 (feat: complete global emergency circuit breaker and unify instance storage hooks #831)
 
         let final_tre: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
         let required_balance = tre_bal.checked_add(fee)
@@ -472,7 +476,8 @@ impl LendingContract {
             extend_debt_ttl(&env, &user);
         }
         let debt = effective_debt(&position, env.ledger().timestamp(), DEFAULT_APR_BPS)
-            .unwrap_or(position.principal);
+            .unwrap_or(position.principal)
+            .max(0);
         
         let health_factor = if debt > 0 {
             col.checked_mul(8000)
@@ -490,8 +495,14 @@ impl LendingContract {
     }
 }
 
-<<<<<<< HEAD
-=======
+fn extend_collateral_ttl(_env: &Env, _user: &Address) {
+    // Placeholder: preserve current collateral entry TTL semantics.
+}
+
+fn extend_debt_ttl(_env: &Env, _user: &Address) {
+    // Placeholder: preserve current debt entry TTL semantics.
+}
+
 fn get_emergency_state(env: &Env) -> EmergencyState {
     env.storage()
         .instance()
@@ -523,7 +534,6 @@ fn panic_with_debt_error() -> ! {
     panic!("debt operation failed");
 }
 
->>>>>>> f6bcee0 (feat: complete global emergency circuit breaker and unify instance storage hooks #831)
 #[cfg(test)]
 mod test {
     use super::*;

@@ -120,10 +120,11 @@ pub fn repay_amount(
     }
 
     let mut settled = settle_accrual(&position, now, rate_bps)?;
-    settled.principal = settled
-        .principal
-        .checked_sub(amount)
-        .ok_or(DebtError::Overflow)?;
+    settled.principal = if amount >= settled.principal {
+        0
+    } else {
+        settled.principal - amount
+    };
     settled.last_update = now;
     Ok(settled)
 }
