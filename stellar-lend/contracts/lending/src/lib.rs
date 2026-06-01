@@ -18,7 +18,6 @@ use soroban_sdk::{
 /// Maximum desired persistent TTL for position entries, in ledgers.
 /// We bound the extension by the network's `max_ttl` to remain compatible
 /// with runtime limits while keeping active positions alive for a long window.
-#[cfg(test)]
 const PERSISTENT_TTL_LEDGERS: u32 = 1_000_000;
 const DEFAULT_DEPOSIT_CAP: i128 = 1_000_000_000_000;
 
