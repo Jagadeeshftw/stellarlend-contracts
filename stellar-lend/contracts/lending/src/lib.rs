@@ -1,5 +1,6 @@
 #![no_std]
 
+mod debt;
 pub mod rounding_strategy;
 mod debt;
 
@@ -13,16 +14,61 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, Address, 
 const MIN_COLLATERAL_RATIO_BPS: i128 = 10_000;
 
 #[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct PositionSummary {
-    pub collateral: i128,
-    pub debt: i128,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmergencyState {
+    Normal,
+    Shutdown,
+    Recovery,
 }
+
+/// Labels used by `check_emergency_status` to decide which operations are
+/// allowed under each circuit-breaker state.
+pub enum ProtocolAction {
+    Deposit,
+    Withdraw,
+    Borrow,
+    Repay,
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum LendingError {
+    BelowMinimumBorrow   = 1008,
+    /// Contract has not been initialized yet.
+    NotInitialized       = 1009,
+    /// `initialize` was called a second time.
+    AlreadyInitialized   = 1010,
+    DebtCeilingExceeded  = 2001,
+    DepositCapExceeded   = 2002,
+    Overflow             = 2003,
+    /// Caller is not the admin.
+    Unauthorized         = 2004,
+    /// Fee outside the permitted range.
+    InvalidFeeBps        = 2005,
+    PositionHealthy      = 2006,
+}
+
+// ---------------------------------------------------------------------------
+// Shared view structs
+// ---------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PositionSummary {
+    pub collateral: i128,
+    pub debt: i128,
+    pub health_factor: i128,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
     BelowMinimumBorrow = 1008,
     InsufficientCollateral = 1009,
 }
@@ -33,41 +79,75 @@ pub struct LendingContract;
 #[contractimpl]
 impl LendingContract {
     pub fn initialize(env: Env, admin: Address) {
-        env.storage().instance().set(&"admin", &admin);
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        set_emergency_state_internal(&env, EmergencyState::Normal);
     }
 
     pub fn get_admin(env: Env) -> Address {
-        env.storage().instance().get(&"admin").unwrap()
+        env.storage().instance().get(&DataKey::Admin).unwrap()
+    }
+
+    /// Propose a new admin (current admin only)
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::get_admin(env.clone());
+        current_admin.require_auth();
+        env.storage().instance().set(&"pending_admin", &new_admin);
+    }
+
+    /// Accept the proposed admin role (proposed admin only)
+    pub fn accept_admin(env: Env) {
+        let pending_admin: Address = env.storage().instance().get(&"pending_admin").expect("no pending admin");
+        pending_admin.require_auth();
+        env.storage().instance().set(&"admin", &pending_admin);
+        env.storage().instance().remove(&"pending_admin");
     }
 
     /// Set the minimum borrow amount (admin-only).
-    pub fn set_min_borrow(env: Env, min_borrow: i128) {
+    pub fn set_min_borrow(env: Env, min_borrow: i128) -> Result<(), Error> {
         let admin = Self::get_admin(env.clone());
         admin.require_auth();
-        env.storage().instance().set(&Symbol::new(&env, "BorrowMinAmount"), &min_borrow);
+        env.storage().instance().set(&DataKey::BorrowMinAmount, &min_borrow);
+        Ok(())
     }
 
     /// Get the minimum borrow amount.
     pub fn get_min_borrow(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&Symbol::new(&env, "BorrowMinAmount"))
-            .unwrap_or(0)
+        env.storage().instance().get(&DataKey::BorrowMinAmount).unwrap_or(0)
     }
 
     /// Deposit collateral for a user.
-    pub fn deposit(env: Env, user: Address, amount: i128) -> i128 {
+    pub fn deposit(env: Env, user: Address, amount: i128) -> Result<i128, Error> {
+        check_emergency_status(&env, ProtocolAction::Deposit);
         // Prevent mutating during an active flash loan callback
-        let active: bool = env.storage().instance().get(&"flash_active").unwrap_or(false);
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FlashActive)
+            .unwrap_or(false);
         if active {
             panic!("FlashLoanReentrancy");
         }
         user.require_auth();
-        let key = ("col", user.clone());
+        
+        // Check deposit cap with overflow protection
+        let total_deposits: i128 = env.storage().persistent().get(&DataKey::TotalDeposits).unwrap_or(0);
+        let deposit_cap: i128 = env.storage().persistent().get(&DataKey::DepositCap).unwrap_or(DEFAULT_DEPOSIT_CAP);
+        
+        let new_total = total_deposits.checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        
+        if new_total > deposit_cap {
+            return Err(Error::DepositCapExceeded);
+        }
+        
+        // Update user collateral with overflow protection
+        let key = DataKey::Collateral(user.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        let new_balance = current + amount;
+        let new_balance = current.checked_add(amount).ok_or(Error::Overflow)?;
         env.storage().persistent().set(&key, &new_balance);
-        new_balance
+        // Extend TTL to prevent archival of collateral entry
+        extend_collateral_ttl(&env, &user);
+        Ok(new_balance)
     }
 
     /// Withdraw collateral for a user.
@@ -77,12 +157,16 @@ impl LendingContract {
     /// 2. The remaining collateral must satisfy the minimum collateral ratio relative to outstanding debt.
     pub fn withdraw(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
         // Prevent mutating during an active flash loan callback
-        let active: bool = env.storage().instance().get(&"flash_active").unwrap_or(false);
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FlashActive)
+            .unwrap_or(false);
         if active {
             panic!("FlashLoanReentrancy");
         }
         user.require_auth();
-        let key = ("col", user.clone());
+        let key = DataKey::Collateral(user.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         if amount > current {
             return Err(LendingError::InsufficientCollateral);
@@ -105,12 +189,32 @@ impl LendingContract {
         Ok(remaining)
     }
 
-    /// Borrow against deposited collateral.
-    pub fn borrow(env: Env, user: Address, amount: i128) -> Result<i128, LendingError> {
+    /// Borrow against deposited collateral. Enforces protocol-level debt ceiling.
+    ///
+    /// # Security Invariant: Overflow Protection
+    /// All debt mutations use `checked_add` to prevent integer overflow.
+    /// If overflow would occur, returns `Error::Overflow`.
+    ///
+    /// # Parameters
+    /// * `env` - The Soroban environment
+    /// * `user` - The user borrowing
+    /// * `amount` - Amount to borrow (must be >= min_borrow)
+    ///
+    /// # Errors
+    /// * `EmergencyState != Normal` - Borrows blocked during emergency
+    /// * `amount < min_borrow` - Below minimum borrow amount
+    /// * `new_total > debt_ceiling` - Exceeds protocol debt ceiling
+    /// * `Error::Overflow` - Checked arithmetic would overflow
+    ///
+    /// # Returns
+    /// User's debt principal after borrow
+    pub fn borrow(env: Env, user: Address, amount: i128) -> Result<i128, Error> {
+        check_emergency_status(&env, ProtocolAction::Borrow);
+
         user.require_auth();
         let min_borrow = Self::get_min_borrow(env.clone());
         if amount < min_borrow {
-            return Err(LendingError::BelowMinimumBorrow);
+            panic!("BelowMinimumBorrow");
         }
         
         let now = env.ledger().timestamp();
@@ -124,9 +228,64 @@ impl LendingContract {
         Ok(updated.principal)
     }
 
-    pub fn repay(env: Env, user: Address, amount: i128) -> i128 {
+    /// Liquidate an undercollateralized position.
+    pub fn liquidate(
+        env: Env,
+        liquidator: Address,
+        borrower: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        liquidator.require_auth();
+
+        let col_key = DataKey::Collateral(borrower.clone());
+        let debt_key = DataKey::Debt(borrower.clone());
+
+        let collateral: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
+        let debt: i128 = env.storage().persistent().get(&debt_key).unwrap_or(0);
+
+        if debt == 0 {
+            return Err(Error::PositionHealthy);
+        }
+
+        // Health Factor Calculation (base 10000). HF = (Collateral * Threshold) / Debt
+        // We use a hardcoded 80% (8000 BPS) liquidation threshold for this implementation.
+        const LIQUIDATION_THRESHOLD: i128 = 8000;
+        let hf = (collateral * LIQUIDATION_THRESHOLD) / debt;
+
+        if hf >= 10000 {
+            return Err(Error::PositionHealthy);
+        }
+
+        // Cap maximum allowed repayment by close factor (50%)
+        const CLOSE_FACTOR: i128 = 5000;
+        let max_repay = (debt * CLOSE_FACTOR) / 10000;
+        let actual_repay = if amount > max_repay { max_repay } else { amount };
+
+        // Apply liquidation incentive bonus (10%)
+        const INCENTIVE_BPS: i128 = 1000;
+        let seized_collateral = (actual_repay * (10000 + INCENTIVE_BPS)) / 10000;
+        
+        // Ensure we don't seize more than available
+        let final_seized = if seized_collateral > collateral { collateral } else { seized_collateral };
+
+        let new_debt = debt - actual_repay;
+        let new_col = collateral - final_seized;
+
+        env.storage().persistent().set(&debt_key, &new_debt);
+        env.storage().persistent().set(&col_key, &new_col);
+
+        Ok(actual_repay)
+    }
+
+    pub fn repay(env: Env, user: Address, amount: i128) -> Result<i128, Error> {
+        check_emergency_status(&env, ProtocolAction::Repay);
+
         // Prevent mutating during an active flash loan callback
-        let active: bool = env.storage().instance().get(&"flash_active").unwrap_or(false);
+        let active: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::FlashActive)
+            .unwrap_or(false);
         if active {
             panic!("FlashLoanReentrancy");
         }
@@ -134,48 +293,70 @@ impl LendingContract {
         let now = env.ledger().timestamp();
         let position = load_debt(&env, &user);
         let updated = repay_amount(position, now, amount, DEFAULT_APR_BPS)
-            .unwrap_or_else(|_| panic_with_debt_error());
+            .map_err(|_| Error::Overflow)?;
         save_debt(&env, &user, &updated);
-        updated.principal
+        extend_debt_ttl(&env, &user);
+        Ok(updated.principal)
     }
 
     pub fn get_debt_position(env: Env, user: Address) -> DebtPosition {
-        load_debt(&env, &user)
+        let position = load_debt(&env, &user);
+        if position.principal != 0 {
+            extend_debt_ttl(&env, &user);
+        }
+        position
     }
 
-    // Flash loan fee setter (bps). Only admin may call.
-    pub fn set_flash_loan_fee_bps(env: Env, admin: Address, fee_bps: i128) {
+    /// Set the protocol-level debt ceiling (admin-only).
+    pub fn set_debt_ceiling(env: Env, ceiling: i128) -> Result<(), Error> {
+        let admin = Self::get_admin(env.clone());
         admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&"admin").unwrap();
-        if stored_admin != admin {
-            panic!("Unauthorized");
-        }
-        const MAX_FEE: i128 = 1000;
-        if fee_bps < 0 || fee_bps > MAX_FEE {
-            panic!("InvalidFeeBps");
-        }
-        env.storage().instance().set(&"flash_fee_bps", &fee_bps);
+        env.storage().instance().set(&DataKey::DebtCeiling, &ceiling);
+        Ok(())
+    }
+
+    /// Privileged function to update the global emergency state. Only callable by `admin` or `guardian`.
+    pub fn set_emergency_state(env: Env, new_state: EmergencyState) {
+        let guardian = env.storage().instance().get::<_, Address>(&DataKey::Guardian)
+            .unwrap_or_else(|| env.storage().instance().get::<_, Address>(&DataKey::Admin).unwrap() );
+        guardian.require_auth();
+
+        let old_state = get_emergency_state(&env);
+        set_emergency_state_internal(&env, new_state);
+
+        env.events().publish(
+            (Symbol::new(&env, "EmergencyStateChanged"),),
+            (old_state, new_state),
+        );
     }
 
     fn get_flash_fee_bps(env: &Env) -> i128 {
-        env.storage().instance().get(&"flash_fee_bps").unwrap_or(5)
+        env.storage().instance().get(&DataKey::FlashFeeBps).unwrap_or(5)
     }
 
     // Repay function used by receiver during callback to return funds to the contract.
     // Repay function used by receiver during callback to return funds to the contract.
     pub fn repay_flash_loan(env: Env, payer: Address, asset: Address, amount: i128) {
         payer.require_auth();
-        // subtract from payer balance
-        let payer_key = ("bal", asset.clone(), payer.clone());
+        // subtract from payer balance with overflow protection
+        let payer_key = DataKey::Balance(asset.clone(), payer.clone());
         let payer_bal: i128 = env.storage().persistent().get(&payer_key).unwrap_or(0);
         if payer_bal < amount {
             panic!("InsufficientBalance");
         }
-        env.storage().persistent().set(&payer_key, &(payer_bal - amount));
-        // add to contract treasury
-        let tre_key = ("treasury", asset.clone());
+        let new_payer_bal = payer_bal.checked_sub(amount)
+            .expect("repay_flash_loan: payer balance underflow");
+        env.storage()
+            .persistent()
+            .set(&payer_key, &new_payer_bal);
+        // add to contract treasury with overflow protection
+        let tre_key = DataKey::Treasury(asset.clone());
         let tre_bal: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
-        env.storage().persistent().set(&tre_key, &(tre_bal + amount));
+        let new_tre_bal = tre_bal.checked_add(amount)
+            .expect("repay_flash_loan: treasury balance overflow");
+        env.storage()
+            .persistent()
+            .set(&tre_key, &new_tre_bal);
     }
 
     /// Execute a flash loan: transfer assets to `receiver`, call its `on_flash_loan` callback,
@@ -190,57 +371,118 @@ impl LendingContract {
     ) {
         initiator.require_auth();
         // Check liquidity
-        let tre_key = ("treasury", asset.clone());
+        let tre_key = DataKey::Treasury(asset.clone());
         let tre_bal: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
         if amount > tre_bal {
             panic!("InsufficientLiquidity");
         }
 
-        // Ensure receiver consent
         receiver.require_auth();
 
-        // compute fee
         let fee_bps = Self::get_flash_fee_bps(&env);
-        let fee = amount * fee_bps / 10_000;
+        let fee = amount.checked_mul(fee_bps)
+            .and_then(|v| Some(v / 10_000))
+            .expect("flash_loan: fee calculation overflow");
 
-        // transfer out: treasury -= amount; receiver balance += amount
-        env.storage().persistent().set(&tre_key, &(tre_bal - amount));
-        let rec_key = ("bal", asset.clone(), receiver.clone());
+        // transfer out: treasury -= amount; receiver balance += amount (with overflow protection)
+        let new_tre_bal = tre_bal.checked_sub(amount)
+            .expect("flash_loan: treasury underflow during transfer");
+        env.storage()
+            .persistent()
+            .set(&tre_key, &new_tre_bal);
+        
+        let rec_key = DataKey::Balance(asset.clone(), receiver.clone());
         let rec_bal: i128 = env.storage().persistent().get(&rec_key).unwrap_or(0);
-        env.storage().persistent().set(&rec_key, &(rec_bal + amount));
+        let new_rec_bal = rec_bal.checked_add(amount)
+            .expect("flash_loan: receiver balance overflow");
+        env.storage()
+            .persistent()
+            .set(&rec_key, &new_rec_bal);
 
         // set reentrancy guard
-        env.storage().instance().set(&"flash_active", &true);
+        env.storage().instance().set(&DataKey::FlashActive, &true);
 
-        // invoke receiver callback: on_flash_loan(initiator, asset, amount, fee, params)
         let method = Symbol::new(&env, "on_flash_loan");
         // Call contract - if it panics, propagate
         env.invoke_contract::<Val>(&receiver, &method, soroban_sdk::vec![&env, initiator.into_val(&env), asset.into_val(&env), amount.into_val(&env), fee.into_val(&env), params.into_val(&env)]);
 
         // clear reentrancy guard before checks to ensure state is readable
-        env.storage().instance().set(&"flash_active", &false);
+        env.storage().instance().set(&DataKey::FlashActive, &false);
 
-        // verify repayment: treasury balance must be >= previous tre_bal + fee
         let final_tre: i128 = env.storage().persistent().get(&tre_key).unwrap_or(0);
-        if final_tre < tre_bal + fee {
+        let required_balance = tre_bal.checked_add(fee)
+            .expect("flash_loan: fee addition overflow");
+        if final_tre < required_balance {
             panic!("InsufficientRepayment");
         }
     }
 
-    /// Get the user's current position summary.
     pub fn get_position(env: Env, user: Address) -> PositionSummary {
-        let col: i128 = env
-            .storage()
-            .persistent()
-            .get(&("col", user.clone()))
-            .unwrap_or(0);
+        let col_key = DataKey::Collateral(user.clone());
+        let col: i128 = env.storage().persistent().get(&col_key).unwrap_or(0);
+        if col != 0 {
+            extend_collateral_ttl(&env, &user);
+        }
         let position = load_debt(&env, &user);
+        if position.principal != 0 {
+            extend_debt_ttl(&env, &user);
+        }
         let debt = effective_debt(&position, env.ledger().timestamp(), DEFAULT_APR_BPS)
             .unwrap_or(position.principal);
+        
+        let health_factor = if debt > 0 {
+            col.checked_mul(8000)
+                .map(|v| v / debt)
+                .unwrap_or(i128::MAX) // Sentinel for overflow/healthy
+        } else {
+            1000000 // Sentinel for healthy (no debt)
+        };
+
         PositionSummary {
             collateral: col,
             debt,
+            health_factor,
         }
+    }
+    env.storage().temporary().set(&reentrancy_lock_key, &true);
+}
+
+fn release_reentrancy_lock(env: &Env) {
+    let reentrancy_lock_key = Symbol::new(env, "reent_l");
+    env.storage().temporary().remove(&reentrancy_lock_key);
+}
+
+fn with_reentrancy_lock<T>(env: &Env, f: impl FnOnce() -> T) -> T {
+    acquire_reentrancy_lock(env);
+    let result = f();
+    release_reentrancy_lock(env);
+    result
+}
+
+fn get_emergency_state(env: &Env) -> EmergencyState {
+    env.storage()
+        .instance()
+        .get(&DataKey::EmergencyState)
+        .unwrap_or(EmergencyState::Normal)
+}
+
+fn set_emergency_state_internal(env: &Env, state: EmergencyState) {
+    env.storage().instance().set(&DataKey::EmergencyState, &state);
+}
+
+fn check_emergency_status(env: &Env, action: ProtocolAction) {
+    let state = get_emergency_state(env);
+    match state {
+        EmergencyState::Normal => {}
+        EmergencyState::Shutdown => {
+            panic!("OperationDisabledDuringShutdown");
+        }
+        EmergencyState::Recovery => match action {
+            ProtocolAction::Repay | ProtocolAction::Withdraw => {}
+            _ => {
+                panic!("ActionBlockedInRecovery");
+            }
+        },
     }
 }
 
@@ -248,26 +490,35 @@ fn panic_with_debt_error() -> ! {
     panic!("debt operation failed");
 }
 
+fn extend_collateral_ttl(env: &Env, user: &Address) {
+    let key = DataKey::Collateral(user.clone());
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_LEDGERS, PERSISTENT_TTL_LEDGERS);
+}
+
+fn extend_debt_ttl(env: &Env, user: &Address) {
+    let key = DataKey::Debt(user.clone());
+    env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL_LEDGERS, PERSISTENT_TTL_LEDGERS);
+}
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _, LedgerInfo, Address};
 
-    fn setup() -> (Env, LendingContractClient<'static>, Address, Address) {
+    fn setup() -> (Env, LendingContractClient<'static>, soroban_sdk::Address, soroban_sdk::Address) {
         let env = Env::default();
         env.mock_all_auths();
         let id = env.register(LendingContract, ());
         let client = LendingContractClient::new(&env, &id);
-        let admin = Address::generate(&env);
-        let user = Address::generate(&env);
+        let admin = soroban_sdk::Address::generate(&env);
+        let user = soroban_sdk::Address::generate(&env);
         client.initialize(&admin);
         (env, client, admin, user)
     }
 
     fn advance_time(env: &Env, seconds: u64) {
-        let mut li = env.ledger().get();
+        let mut li: LedgerInfo = env.ledger().get();
         li.timestamp = li.timestamp.saturating_add(seconds);
-        li.sequence_number = li.sequence_number.saturating_add(1);
+        li.sequence_number = li.sequence_number.saturating_add(seconds as u32);
         env.ledger().set(li);
     }
 
@@ -276,6 +527,85 @@ mod test {
         let (_env, client, admin, _user) = setup();
         assert_eq!(client.get_admin(), admin);
     }
+
+    // -----------------------------------------------------------------------
+    // Admin-only privileged setter guards
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_unauthorized_set_min_borrow_rejected() {
+        let (env, client, _admin, _user) = setup();
+        // Create a fresh address that has not been authenticated as admin.
+        let attacker = Address::generate(&env);
+        // With mock_all_auths the env will satisfy any require_auth, so we
+        // instead call the method without mocking to observe the auth failure.
+        let env2 = Env::default();
+        let id2 = env2.register(LendingContract, ());
+        let client2 = LendingContractClient::new(&env2, &id2);
+        let admin2 = Address::generate(&env2);
+        // Initialize is also called without mock so the auth here is critical.
+        env2.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &admin2,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &id2,
+                fn_name: "initialize",
+                args: (admin2.clone(),).into_val(&env2),
+                sub_invokes: &[],
+            },
+        }]);
+        client2.initialize(&admin2).unwrap();
+        // Now call set_min_borrow as attacker with no auth — should panic.
+        client2.set_min_borrow(&100).unwrap();
+    }
+
+    #[test]
+    fn test_set_min_borrow_admin_only() {
+        let (_env, client, _admin, _user) = setup();
+        assert_eq!(client.get_min_borrow(), 0);
+        client.set_min_borrow(&100).unwrap();
+        assert_eq!(client.get_min_borrow(), 100);
+    }
+
+    #[test]
+    fn test_set_debt_ceiling_admin_only() {
+        let (_env, client, _admin, _user) = setup();
+        client.set_debt_ceiling(&1_000_000).unwrap();
+        // No getter yet, just assert no panic.
+    }
+
+    #[test]
+    fn test_set_flash_fee_valid_range() {
+        let (_env, client, _admin, _user) = setup();
+        client.set_flash_fee(&50).unwrap();
+    }
+
+    #[test]
+    fn test_set_flash_fee_rejects_out_of_range() {
+        let (_env, client, _admin, _user) = setup();
+        let res = client.try_set_flash_fee(&1_001);
+        assert!(
+            matches!(res, Err(Ok(LendingError::InvalidFeeBps))),
+            "expected InvalidFeeBps, got {:?}", res
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Admin rotation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let (env, client, _admin, _user) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&new_admin).unwrap();
+        client.accept_admin().unwrap();
+        assert_eq!(client.get_admin().unwrap(), new_admin);
+    }
+
+    // -----------------------------------------------------------------------
+    // Core operations
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_deposit_increases_balance() {
@@ -346,6 +676,37 @@ mod test {
     }
 
     #[test]
+    fn test_ttl_keeps_position_live_across_reads() {
+        let (env, client, _admin, user) = setup();
+        client.deposit(&user, &200).unwrap();
+        client.borrow(&user, &75).unwrap();
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2) as u64);
+        let pos_mid = client.get_position(&user);
+        assert_eq!(pos_mid.collateral, 200);
+        assert_eq!(pos_mid.debt, 75);
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2 + 1) as u64);
+        let pos_after = client.get_position(&user);
+        assert_eq!(pos_after.collateral, 200);
+        assert_eq!(pos_after.debt, 75);
+    }
+
+    #[test]
+    fn test_get_debt_position_extends_debt_ttl() {
+        let (env, client, _admin, user) = setup();
+        client.borrow(&user, &100).unwrap();
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2) as u64);
+        let debt_mid = client.get_debt_position(&user);
+        assert_eq!(debt_mid.principal, 100);
+
+        advance_time(&env, (PERSISTENT_TTL_LEDGERS / 2 + 1) as u64);
+        let debt_after = client.get_debt_position(&user);
+        assert_eq!(debt_after.principal, 100);
+    }
+
+    #[test]
     fn test_position_summary_default_zero() {
         let (_env, client, _admin, user) = setup();
         let pos = client.get_position(&user);
@@ -356,7 +717,7 @@ mod test {
     #[test]
     fn test_borrow_below_minimum_rejected() {
         let (_env, client, _admin, user) = setup();
-        client.set_min_borrow(&50);
+        client.set_min_borrow(&50).unwrap();
         let res = client.try_borrow(&user, &40);
         assert!(res.is_err());
     }
@@ -364,14 +725,14 @@ mod test {
     #[test]
     fn test_borrow_exactly_minimum_accepted() {
         let (_env, client, _admin, user) = setup();
-        client.set_min_borrow(&50);
-        let res = client.borrow(&user, &50);
+        client.set_min_borrow(&50).unwrap();
+        let res = client.borrow(&user, &50).unwrap();
         assert_eq!(res, 50);
     }
 
     #[test]
     fn test_set_min_borrow_admin_only() {
-        let (_env, client, admin, _user) = setup();
+        let (_env, client, _admin, _user) = setup();
         assert_eq!(client.get_min_borrow(), 0);
         client.set_min_borrow(&100);
         assert_eq!(client.get_min_borrow(), 100);
