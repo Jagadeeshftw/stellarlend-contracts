@@ -127,6 +127,7 @@ export interface OracleServiceConfig {
     adminHmacSecret?: string;
     updateIntervalMs: number;
     maxPriceDeviationPercent: number;
+    madZScoreThreshold: number;
     priceStaleThresholdSeconds: number;
     cacheTtlSeconds: number;
     redisUrl?: string;
