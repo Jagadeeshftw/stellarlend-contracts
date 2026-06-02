@@ -94,7 +94,7 @@ implementation errors and revert on violation.
 
 ### `hello-world`
 
-`hello-world` combines lending, AMM, bridge, governance, analytics, and monitoring concerns in one crate. Because it is outside the active workspace and duplicates functionality now split across maintained crates, it should be treated as historical/reference code rather than the deployment artifact.
+`hello-world` combines lending, AMM, bridge, governance, analytics, and monitoring concerns in one crate. Because it remains in the active workspace only for compatibility and duplicates functionality now split across maintained crates, it should be treated as historical/reference code rather than the deployment artifact.
 
 ## Trust Boundaries
 
