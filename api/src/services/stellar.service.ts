@@ -16,7 +16,16 @@ import axios from 'axios';
 import { config } from '../config';
 import logger from '../utils/logger';
 import { InternalServerError } from '../utils/errors';
-import { TransactionResponse, TransactionStatus } from '../types';
+import {
+  TransactionResponse,
+  TransactionStatus,
+  AmmEventDecodeResult,
+  AmmEventKind,
+  AmmEventTopic,
+  AmmEventV1,
+  AMM_EVENT_TOPIC_MODULE,
+  AMM_EVENT_TOPIC_VERSION,
+} from '../types';
 
 export class StellarService {
   private horizonUrl: string;
@@ -257,6 +266,71 @@ export class StellarService {
       status: 'pending',
       message: 'Transaction monitoring timeout',
     };
+  }
+
+  public parseAmmEventTopic(topics: unknown): AmmEventTopic | null {
+    if (!Array.isArray(topics) || topics.length !== 3) {
+      return null;
+    }
+
+    const [module, version, kind] = topics;
+    if (
+      module !== AMM_EVENT_TOPIC_MODULE ||
+      version !== AMM_EVENT_TOPIC_VERSION ||
+      typeof kind !== 'string'
+    ) {
+      return null;
+    }
+
+    const eventKind = kind as AmmEventKind;
+    if (!['swap', 'add_liquidity', 'remove_liquidity'].includes(eventKind)) {
+      return null;
+    }
+
+    return {
+      module: AMM_EVENT_TOPIC_MODULE,
+      version: AMM_EVENT_TOPIC_VERSION,
+      kind: eventKind,
+    };
+  }
+
+  public decodeAmmEvent(rawEvent: unknown): AmmEventDecodeResult | null {
+    if (!rawEvent || typeof rawEvent !== 'object') {
+      return null;
+    }
+
+    const event = rawEvent as { topics?: unknown; data?: unknown };
+    const topic = this.parseAmmEventTopic(event.topics);
+    if (!topic) {
+      return null;
+    }
+
+    if (!event.data || typeof event.data !== 'object') {
+      return null;
+    }
+
+    const data = event.data as unknown as AmmEventV1;
+    if (data.schema_version !== 1 || data.event !== topic.kind) {
+      return null;
+    }
+
+    return {
+      topic,
+      data,
+    };
+  }
+
+  public extractAmmEventsFromTransactionResult(txResult: any): AmmEventDecodeResult[] {
+    if (!txResult || !Array.isArray(txResult.events)) {
+      return [];
+    }
+
+    return txResult.events
+      .map((event: unknown): AmmEventDecodeResult | null => this.decodeAmmEvent(event))
+      .filter(
+        (decoded: AmmEventDecodeResult | null): decoded is AmmEventDecodeResult =>
+          decoded !== null
+      );
   }
 
   async healthCheck(): Promise<{ horizon: boolean; sorobanRpc: boolean }> {
