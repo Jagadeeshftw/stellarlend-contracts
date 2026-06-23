@@ -10,6 +10,11 @@ This bounded range approach replaces the old `* 2` multiplier to tightly bound t
 ## Borrow Rate Storage Reads
 
 `current_borrow_rate` is a hot helper for borrow, repay, liquidation, and health-factor paths. It must load `TotalDebt`, `TotalDeposits`, and `RateParams` once through `load_rate_snapshot`, then perform all utilization and kink-rate math from that snapshot. This keeps storage reads bounded and prevents future edits from scattering duplicate aggregate loads through nested branches.
+## Liquidation Accrual Budget
+`liquidate` settles borrower debt once at the start of the function and reuses
+that settled principal for the health-factor check, close-factor cap, and final
+debt write. Future liquidation changes should keep a single accrual settlement
+per call unless they document why a second rounding-heavy accrual is required.
 
 ## Updating Baselines
 If a new feature is legitimately added that increases the gas ceiling of a core operation:
