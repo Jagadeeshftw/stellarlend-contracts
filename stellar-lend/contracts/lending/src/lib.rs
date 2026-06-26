@@ -12,6 +12,8 @@ mod admin_setters_dedupe_test;
 #[cfg(test)]
 mod deposit_accounting_test;
 #[cfg(test)]
+mod repay_overpay_test;
+#[cfg(test)]
 mod emergency_state_matrix_test;
 #[cfg(test)]
 mod error_codes_test;
