@@ -67,6 +67,8 @@ mod liquidate_event_test;
 mod bad_debt_ledger_test;
 #[cfg(test)]
 mod supply_rate_split_test;
+#[cfg(test)]
+mod insurance_fund_test;
 
 use debt::{
     borrow_amount, cached_borrow_rate, effective_debt, load_debt, repay_amount, save_debt,
@@ -132,6 +134,8 @@ pub enum DataKey {
     TotalDebtAsset(Address),
     /// Insurance fund balance credited by governance or protocol fees (i128).
     InsuranceFund,
+    /// Configured share of accrued interest directed to the insurance fund (i128, bps).
+    InsuranceShareBps,
 }
 
 #[contractevent]
@@ -706,7 +710,8 @@ impl LendingContract {
         let position = load_debt(&env, &user);
         let prev_principal = position.principal;
         let rate = current_borrow_rate(&env);
-        let updated = borrow_amount(position, now, amount, rate).map_err(|e| match e {
+        let settled_position = settle_and_accrue_insurance(&env, &position, now, rate)?;
+        let updated = borrow_amount(settled_position, now, amount, rate).map_err(|e| match e {
             debt::DebtError::InvalidAmount => LendingError::InvalidAmount,
             debt::DebtError::Overflow => LendingError::Overflow,
         })?;
@@ -790,7 +795,7 @@ impl LendingContract {
         // Settle the borrower's debt once and reuse the settled principal for
         // the health-factor check, close-factor cap, and final debt write.
         let settled_position =
-            settle_accrual(&position, now, DEFAULT_APR_BPS).unwrap_or(DebtPosition {
+            settle_and_accrue_insurance(&env, &position, now, DEFAULT_APR_BPS).unwrap_or_else(|_| DebtPosition {
                 principal: position.principal,
                 last_update: now,
             });
@@ -849,21 +854,27 @@ impl LendingContract {
             let shortfall = seized_collateral
                 .checked_sub(available_collateral)
                 .ok_or(LendingError::Overflow)?;
-            let current_bad_debt: i128 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::BadDebt)
-                .unwrap_or(0i128);
-            let new_bad_debt = current_bad_debt
-                .checked_add(shortfall)
+            let insurance_drawn = draw_insurance(&env, shortfall)?;
+            let residual = shortfall
+                .checked_sub(insurance_drawn)
                 .ok_or(LendingError::Overflow)?;
-            env.storage()
-                .persistent()
-                .set(&DataKey::BadDebt, &new_bad_debt);
-            env.events().publish(
-                (Symbol::new(&env, "bad_debt"), borrower.clone()),
-                shortfall,
-            );
+            if residual > 0 {
+                let current_bad_debt: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::BadDebt)
+                    .unwrap_or(0i128);
+                let new_bad_debt = current_bad_debt
+                    .checked_add(residual)
+                    .ok_or(LendingError::Overflow)?;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::BadDebt, &new_bad_debt);
+                env.events().publish(
+                    (Symbol::new(&env, "bad_debt"), borrower.clone()),
+                    residual,
+                );
+            }
             available_collateral
         } else {
             seized_collateral
@@ -933,7 +944,8 @@ impl LendingContract {
         let position = load_debt(&env, &user);
         let prev_principal = position.principal;
         let rate = current_borrow_rate(&env);
-        let updated = repay_amount(position, now, amount, rate).map_err(|e| match e {
+        let settled_position = settle_and_accrue_insurance(&env, &position, now, rate)?;
+        let updated = repay_amount(settled_position, now, amount, rate).map_err(|e| match e {
             debt::DebtError::InvalidAmount => LendingError::InvalidAmount,
             debt::DebtError::Overflow => LendingError::Overflow,
         })?;
@@ -1232,6 +1244,55 @@ impl LendingContract {
             .instance()
             .get(&DataKey::InsuranceFund)
             .unwrap_or(0)
+    }
+
+    /// Return the configured insurance fund interest share in basis points.
+    pub fn get_insurance_share(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InsuranceShareBps)
+            .unwrap_or(0)
+    }
+
+    /// Fund the insurance fund by an explicit amount.
+    ///
+    /// Only the protocol admin can call this.
+    ///
+    /// # Errors
+    /// - [`LendingError::InvalidAmount`] if `amount <= 0`.
+    /// - [`LendingError::Overflow`] if the resulting balance would overflow i128.
+    pub fn fund_insurance(env: Env, amount: i128) -> Result<(), LendingError> {
+        assert_admin(&env);
+        if amount <= 0 {
+            return Err(LendingError::InvalidAmount);
+        }
+        let current: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceFund)
+            .unwrap_or(0);
+        let new_balance = current.checked_add(amount).ok_or(LendingError::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceFund, &new_balance);
+        Ok(())
+    }
+
+    /// Set the insurance fund interest share in basis points (admin-only).
+    ///
+    /// The share must be between 0 and 10000 bps (0% to 100%).
+    ///
+    /// # Errors
+    /// - [`LendingError::InvalidAmount`] if `share_bps < 0 || share_bps > 10000`.
+    pub fn set_insurance_share(env: Env, share_bps: i128) -> Result<(), LendingError> {
+        assert_admin(&env);
+        if share_bps < 0 || share_bps > 10000 {
+            return Err(LendingError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceShareBps, &share_bps);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1581,6 +1642,64 @@ impl LendingContract {
     pub fn get_min_upgrade_delay_ledgers(env: Env) -> u32 {
         upgrade::get_min_upgrade_delay_ledgers(&env)
     }
+}
+
+pub(crate) fn settle_and_accrue_insurance(
+    env: &Env,
+    position: &DebtPosition,
+    now: u64,
+    rate_bps: i128,
+) -> Result<DebtPosition, LendingError> {
+    let elapsed = debt::elapsed_seconds(now, position.last_update);
+    let interest = debt::accrue_interest(position.principal, elapsed, rate_bps)
+        .map_err(|_| LendingError::Overflow)?;
+
+    if interest > 0 {
+        let share_bps: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceShareBps)
+            .unwrap_or(0);
+        if share_bps > 0 {
+            let share = interest
+                .checked_mul(share_bps)
+                .ok_or(LendingError::Overflow)?
+                .checked_div(BPS_DENOM)
+                .ok_or(LendingError::Overflow)?;
+            if share > 0 {
+                let current_fund: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::InsuranceFund)
+                    .unwrap_or(0);
+                let new_fund = current_fund.checked_add(share).ok_or(LendingError::Overflow)?;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::InsuranceFund, &new_fund);
+            }
+        }
+    }
+
+    let settled = debt::settle_accrual(position, now, rate_bps)
+        .map_err(|_| LendingError::Overflow)?;
+    Ok(settled)
+}
+
+fn draw_insurance(env: &Env, amount: i128) -> Result<i128, LendingError> {
+    if amount <= 0 {
+        return Ok(0);
+    }
+    let current: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::InsuranceFund)
+        .unwrap_or(0);
+    let drawn = amount.min(current);
+    let new_balance = current.checked_sub(drawn).ok_or(LendingError::Overflow)?;
+    env.storage()
+        .instance()
+        .set(&DataKey::InsuranceFund, &new_balance);
+    Ok(drawn)
 }
 
 #[allow(dead_code)]

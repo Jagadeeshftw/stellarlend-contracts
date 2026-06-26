@@ -356,7 +356,8 @@ pub fn borrow_asset_internal(
     let rate = crate::current_borrow_rate(env);
     let position = load_debt_asset(env, user, asset);
     let prev_principal = position.principal;
-    let updated = crate::debt::borrow_amount(position, now, amount, rate)
+    let settled_position = crate::settle_and_accrue_insurance(env, &position, now, rate)?;
+    let updated = crate::debt::borrow_amount(settled_position, now, amount, rate)
         .map_err(|_| LendingError::Overflow)?;
     save_debt_asset(env, user, asset, &updated);
     add_to_user_debt_list(env, user, asset);
@@ -448,7 +449,8 @@ pub fn repay_asset_internal(
     let rate = crate::current_borrow_rate(env);
     let position = load_debt_asset(env, user, asset);
     let prev_principal = position.principal;
-    let updated = crate::debt::repay_amount(position, now, amount, rate)
+    let settled_position = crate::settle_and_accrue_insurance(env, &position, now, rate)?;
+    let updated = crate::debt::repay_amount(settled_position, now, amount, rate)
         .map_err(|_| LendingError::Overflow)?;
     save_debt_asset(env, user, asset, &updated);
     if updated.principal == 0 {
