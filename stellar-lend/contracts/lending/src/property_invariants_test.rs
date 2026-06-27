@@ -102,8 +102,9 @@ fn property_random_operation_sequences_preserve_invariants() {
                         let amount = amount as i128;
                         let position = client.get_position(&user);
                         
-                        // Only borrow if collateral can support it (simple 2:1 LTV check)
-                        if position.collateral.saturating_mul(2) >= position.debt.saturating_add(amount) {
+                        // Only borrow if collateral can support it based on contract limits (80% LTV)
+                        // collateral * LIQUIDATION_THRESHOLD_BPS >= new_debt * HEALTH_FACTOR_SCALE
+                        if position.collateral.saturating_mul(8000) >= position.debt.saturating_add(amount).saturating_mul(10000) {
                             let call = client.try_borrow(&user, &amount);
                             prop_assert!(call.is_ok());
                             expected_debt += amount;

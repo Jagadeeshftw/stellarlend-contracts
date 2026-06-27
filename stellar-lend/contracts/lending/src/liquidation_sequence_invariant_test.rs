@@ -136,9 +136,9 @@ fn liquidation_sequence_invariants_hold_across_seeded_sequences() {
                         let amount = amount as i128;
                         let position = client.get_position(&borrower);
                         
-                        // Only borrow if collateral can support it (simple 2:1 LTV check)
-                        // Collateral * 2 must be >= current debt + new borrow
-                        if position.collateral.saturating_mul(2) >= position.debt.saturating_add(amount) {
+                        // Only borrow if collateral can support it based on contract limits (80% LTV)
+                        // collateral * LIQUIDATION_THRESHOLD_BPS >= new_debt * HEALTH_FACTOR_SCALE
+                        if position.collateral.saturating_mul(8000) >= position.debt.saturating_add(amount).saturating_mul(10000) {
                             let result = client.try_borrow(&borrower, &amount);
                             prop_assert!(result.is_ok());
                             expected_debt = expected_debt.saturating_add(amount);
