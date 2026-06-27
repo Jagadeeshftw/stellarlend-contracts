@@ -236,8 +236,7 @@ fn edge_lopsided_deposit() {
         (10_000_001i128, 1_000i128, 1i128, 1_000i128, 100_000i128);
     // liq_0 = 1_000 * 10_000_001 / 1_000 = 10_000_001
     // liq_1 = 1 * 10_000_001 / 100_000  = 100
-    let result =
-        calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
+    let result = calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
     let (shares, locked) = result.unwrap();
     assert_eq!(shares, 100);
     assert_eq!(locked, 0);
@@ -250,8 +249,7 @@ fn edge_reverse_lopsided_deposit() {
         (10_000_001i128, 1i128, 1_000i128, 100_000i128, 1_000i128);
     // liq_0 = 1 * 10_000_001 / 100_000 = 100
     // liq_1 = 1_000 * 10_000_001 / 1_000 = 10_000_001
-    let result =
-        calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
+    let result = calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
     let (shares, locked) = result.unwrap();
     assert_eq!(shares, 100);
     assert_eq!(locked, 0);
@@ -268,12 +266,16 @@ fn edge_subsequent_deposit_truncates_to_zero() {
 fn edge_non_dilution_tight_bound() {
     // Stress the non-dilution bound: liquidity_1 is the constraint and
     // shares * reserve_1 is exactly amount_1 * total_supply.
-    let (total_supply, amount_0, amount_1, reserve_0, reserve_1) =
-        (1_000_000i128, 1_000_000_000i128, 1i128, 100_000i128, 100_000i128);
+    let (total_supply, amount_0, amount_1, reserve_0, reserve_1) = (
+        1_000_000i128,
+        1_000_000_000i128,
+        1i128,
+        100_000i128,
+        100_000i128,
+    );
     // liq_0 = 1_000_000_000 * 1_000_000 / 100_000 = 10_000_000_000
     // liq_1 = 1 * 1_000_000 / 100_000 = 10
-    let result =
-        calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
+    let result = calculate_mint_shares(total_supply, amount_0, amount_1, reserve_0, reserve_1);
     let (shares, locked) = result.unwrap();
     assert_eq!(shares, 10);
     assert_eq!(locked, 0);

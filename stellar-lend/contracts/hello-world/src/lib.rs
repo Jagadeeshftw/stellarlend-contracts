@@ -44,11 +44,11 @@ pub mod types;
 pub mod withdraw;
 
 #[cfg(test)]
-mod twap_tests;
-#[cfg(test)]
 mod twap_eviction_test;
 #[cfg(test)]
 mod twap_fallback_event_test;
+#[cfg(test)]
+mod twap_tests;
 
 #[cfg(test)]
 mod bridge_fee_test;
