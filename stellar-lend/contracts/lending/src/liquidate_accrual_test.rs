@@ -20,7 +20,13 @@ use soroban_sdk::{
 };
 
 /// Setup test environment with contract, admin, user, and liquidator.
-fn setup() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
+fn setup() -> (
+    Env,
+    LendingContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
 

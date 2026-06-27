@@ -5,8 +5,8 @@
 //!
 //! It uses the Soroban SDK's environment budgeting APIs to fetch the read count.
 
-use soroban_sdk::{Env, testutils::Address as TestAddress};
-use crate::{LendingContract, LendingContractClient, Address};
+use crate::{Address, LendingContract, LendingContractClient};
+use soroban_sdk::{testutils::Address as TestAddress, Env};
 
 // Helper to obtain the number of storage reads from the environment.
 fn read_entry_count(env: &Env) -> u64 {

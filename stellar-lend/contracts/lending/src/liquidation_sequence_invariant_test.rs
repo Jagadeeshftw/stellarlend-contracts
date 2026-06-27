@@ -8,9 +8,8 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use soroban_sdk::testutils::Address as _;
 
 const INVARIANT_SEED: [u8; 32] = [
-    0x6c, 0x69, 0x71, 0x75, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2d, 0x73, 0x65, 0x71,
-    0x2d, 0x30, 0x30, 0x32, 0x2d, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x32, 0x33, 0x34, 0x35,
-    0x36, 0x37,
+    0x6c, 0x69, 0x71, 0x75, 0x69, 0x64, 0x61, 0x74, 0x69, 0x6f, 0x6e, 0x2d, 0x73, 0x65, 0x71, 0x2d,
+    0x30, 0x30, 0x32, 0x2d, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
 ];
 const SEQUENCE_CASES: u32 = 48;
 const MAX_SEQUENCE_STEPS: usize = 16;
@@ -139,7 +138,8 @@ fn liquidation_sequence_invariants_hold_across_seeded_sequences() {
                         let outcome = result;
 
                         if let Ok(actual_repay) = outcome {
-                            let actual_repay = actual_repay.expect("liquidation should return repayment amount");
+                            let actual_repay =
+                                actual_repay.expect("liquidation should return repayment amount");
                             let (expected_repay, expected_seized) = expected_liquidation_outcome(
                                 expected_debt,
                                 expected_collateral,
@@ -148,19 +148,23 @@ fn liquidation_sequence_invariants_hold_across_seeded_sequences() {
                             prop_assert_eq!(actual_repay, expected_repay);
 
                             let new_debt = expected_debt.saturating_sub(actual_repay);
-                            let new_collateral = expected_collateral.saturating_sub(expected_seized);
+                            let new_collateral =
+                                expected_collateral.saturating_sub(expected_seized);
                             expected_debt = new_debt;
                             expected_collateral = new_collateral;
 
                             total_repaid = total_repaid.saturating_add(actual_repay);
                             total_seized = total_seized.saturating_add(expected_seized);
-                            prop_assert!(total_seized <= (total_repaid.saturating_mul(11000) / 10000));
+                            prop_assert!(
+                                total_seized <= (total_repaid.saturating_mul(11000) / 10000)
+                            );
 
-                            let shortfall = if expected_seized >= expected_collateral && new_debt > 0 {
-                                new_debt
-                            } else {
-                                0
-                            };
+                            let shortfall =
+                                if expected_seized >= expected_collateral && new_debt > 0 {
+                                    new_debt
+                                } else {
+                                    0
+                                };
                             tracked_bad_debt = tracked_bad_debt.saturating_add(shortfall);
                             prop_assert!(tracked_bad_debt >= 0);
                         }
