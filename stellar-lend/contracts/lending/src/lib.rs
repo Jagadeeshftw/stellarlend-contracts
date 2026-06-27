@@ -2229,8 +2229,10 @@ mod borrow_rate_snapshot_test {
     }
 }
 
+#[cfg(test)]
 #[contract]
 pub struct MockAmm;
+#[cfg(test)]
 #[contractimpl]
 impl MockAmm {
     pub fn swap(
@@ -2250,8 +2252,10 @@ impl MockAmm {
     }
 }
 
+#[cfg(test)]
 #[contract]
 pub struct BadAmm;
+#[cfg(test)]
 #[contractimpl]
 impl BadAmm {
     pub fn swap(
@@ -2267,8 +2271,10 @@ impl BadAmm {
     }
 }
 
+#[cfg(test)]
 #[contract]
 pub struct MockAsset;
+#[cfg(test)]
 #[contractimpl]
 impl MockAsset {}
 
