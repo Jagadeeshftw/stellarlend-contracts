@@ -14,6 +14,8 @@ mod admin_setters_dedupe_test;
 #[cfg(test)]
 mod bad_debt_ledger_test;
 #[cfg(test)]
+mod cross_asset_e2e_test;
+#[cfg(test)]
 mod bad_debt_write_off_test;
 #[cfg(test)]
 mod borrow_health_factor_test;
