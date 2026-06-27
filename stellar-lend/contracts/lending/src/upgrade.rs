@@ -182,11 +182,7 @@ pub fn upgrade_init(
     assert_admin(env);
     caller.require_auth();
 
-    if env
-        .storage()
-        .instance()
-        .has(&UpgradeKey::Initialized)
-    {
+    if env.storage().instance().has(&UpgradeKey::Initialized) {
         return Err(LendingError::AlreadyInitialized);
     }
     if required_approvals == 0 {
@@ -197,7 +193,9 @@ pub fn upgrade_init(
     let mut approvers = Vec::new(env);
     approvers.push_back(admin.clone());
 
-    env.storage().instance().set(&UpgradeKey::Initialized, &true);
+    env.storage()
+        .instance()
+        .set(&UpgradeKey::Initialized, &true);
     env.storage()
         .instance()
         .set(&UpgradeKey::CurrentWasmHash, &current_wasm_hash);
@@ -218,7 +216,11 @@ pub fn upgrade_init(
 }
 
 /// Add an upgrade approver (admin-only).
-pub fn upgrade_add_approver(env: &Env, caller: &Address, approver: Address) -> Result<(), LendingError> {
+pub fn upgrade_add_approver(
+    env: &Env,
+    caller: &Address,
+    approver: Address,
+) -> Result<(), LendingError> {
     assert_admin(env);
     caller.require_auth();
     ensure_upgrade_initialized(env)?;

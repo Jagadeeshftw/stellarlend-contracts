@@ -65,10 +65,7 @@ fn one_unit_repay_seizes_one_collateral() {
     // seized = 1 * 11000 / 10000 = 1 (floor)
     // new_debt = 3 - 1 = 2
     // new_col = 2 - 1 = 1
-    assert_eq!(
-        pos.debt, 2,
-        "debt should decrease by 1 (floor of 1/1)"
-    );
+    assert_eq!(pos.debt, 2, "debt should decrease by 1 (floor of 1/1)");
     assert_eq!(
         pos.collateral, 1,
         "collateral should decrease by 1, not by 2 (floor protects protocol)"
@@ -83,10 +80,7 @@ fn one_unit_liquidate_returns_actual_repay() {
 
     let liquidator = Address::generate(&env);
     let repay = client.liquidate(&liquidator, &user, &1);
-    assert_eq!(
-        repay, 1,
-        "liquidate must return actual_repay = 1"
-    );
+    assert_eq!(repay, 1, "liquidate must return actual_repay = 1");
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +104,10 @@ fn fractional_seizure_rounds_down_for_liquidator() {
     // new_col = 2 - 2 = 0
     let liquidator = Address::generate(&env);
     let result = client.try_liquidate(&liquidator, &user, &2);
-    assert!(result.is_ok(), "fractional-seizure liquidation should succeed");
+    assert!(
+        result.is_ok(),
+        "fractional-seizure liquidation should succeed"
+    );
 
     let pos = client.get_position(&user);
     assert_eq!(pos.debt, 7, "debt 9 - 2 = 7");
@@ -333,20 +330,13 @@ fn repeated_dust_liquidations_dont_leak_value() {
     // and drain the position much faster.
     for i in 0..8 {
         let result = client.try_liquidate(&liquidator, &user, &1);
-        assert!(
-            result.is_ok(),
-            "dust liquidation {} should succeed",
-            i + 1
-        );
+        assert!(result.is_ok(), "dust liquidation {} should succeed", i + 1);
     }
 
     let pos = client.get_position(&user);
     // repaid = 8, debt = 10 - 8 = 2
     // seized = 8, collateral = 10 - 8 = 2
-    assert_eq!(
-        pos.debt, 2,
-        "debt after 8 dust liquidations: 10 - 8 = 2"
-    );
+    assert_eq!(pos.debt, 2, "debt after 8 dust liquidations: 10 - 8 = 2");
     assert_eq!(
         pos.collateral, 2,
         "collateral after 8 dust liquidations: 10 - 8 = 2"

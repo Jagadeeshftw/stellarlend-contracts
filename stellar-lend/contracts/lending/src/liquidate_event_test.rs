@@ -1,11 +1,17 @@
-use crate::{LiquidationEventV1, LendingContract, LendingContractClient};
+use crate::{LendingContract, LendingContractClient, LiquidationEventV1};
 use soroban_sdk::{
     events::Event,
     testutils::{Address as _, Events},
     Address, Env,
 };
 
-fn setup_liquidatable() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
+fn setup_liquidatable() -> (
+    Env,
+    LendingContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
     let cid = env.register(LendingContract, ());

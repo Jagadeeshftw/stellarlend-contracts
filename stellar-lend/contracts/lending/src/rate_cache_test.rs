@@ -114,7 +114,9 @@ fn missing_rate_params_uses_legacy_default_and_is_cached() {
         assert_eq!(uncached_borrow_rate(&env), crate::debt::DEFAULT_APR_BPS);
         assert_eq!(cached_borrow_rate(&env), crate::debt::DEFAULT_APR_BPS);
         assert_eq!(
-            read_cache(&env, 400).expect("default rate should be cached").rate_bps,
+            read_cache(&env, 400)
+                .expect("default rate should be cached")
+                .rate_bps,
             crate::debt::DEFAULT_APR_BPS
         );
     });

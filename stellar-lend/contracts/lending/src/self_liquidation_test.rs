@@ -3,7 +3,13 @@
 use crate::{LendingContract, LendingContractClient, LendingError};
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
-fn setup() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
+fn setup() -> (
+    Env,
+    LendingContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register(LendingContract, ());
@@ -33,7 +39,10 @@ fn self_liquidation_is_rejected_before_any_state_change() {
 
     let other_liquidator = Address::generate(&env);
     let success = client.try_liquidate(&other_liquidator, &borrower, &100);
-    assert!(success.is_ok(), "distinct-address liquidation should still succeed");
+    assert!(
+        success.is_ok(),
+        "distinct-address liquidation should still succeed"
+    );
 }
 
 #[test]

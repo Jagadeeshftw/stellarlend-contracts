@@ -12,7 +12,13 @@
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
-fn setup() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
+fn setup() -> (
+    Env,
+    LendingContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
     let id = env.register(LendingContract, ());

@@ -91,9 +91,7 @@ pub const BUDGET_PER_DEBT_ASSET: u32 = 4;
 /// | 10| 10| 126    |
 /// | 20| 20| 246    |
 fn read_budget(n_col: u32, n_debt: u32) -> u32 {
-    BUDGET_FIXED_OVERHEAD
-        + n_col * BUDGET_PER_COLLATERAL_ASSET
-        + n_debt * BUDGET_PER_DEBT_ASSET
+    BUDGET_FIXED_OVERHEAD + n_col * BUDGET_PER_COLLATERAL_ASSET + n_debt * BUDGET_PER_DEBT_ASSET
 }
 
 /// Derive the expected worst-case storage reads from the source-code formula.
@@ -114,8 +112,8 @@ fn read_budget(n_col: u32, n_debt: u32) -> u32 {
 fn expected_reads(n_col: u32, n_debt: u32) -> u32 {
     let col_value_reads = 1 + n_col * 2; // list + N × (price + balance)
     let debt_value_reads = 1 + n_debt * 2; // list + M × (price + debt)
-    // HF sub-function fetches both lists and all per-asset entries again.
-    // Early-return path (no debt) still fetches the two lists.
+                                           // HF sub-function fetches both lists and all per-asset entries again.
+                                           // Early-return path (no debt) still fetches the two lists.
     let hf_reads = 2 + n_col * 3 + n_debt * 2;
     col_value_reads + debt_value_reads + hf_reads
 }
@@ -156,9 +154,7 @@ fn setup_with_n_assets(n: u32) -> (Env, Address, Address, Address, soroban_sdk::
     // Bootstrap minimal contract state (mirrors `initialize`)
     env.as_contract(&id, || {
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .persistent()
-            .set(&DataKey::TotalDebt, &0i128);
+        env.storage().persistent().set(&DataKey::TotalDebt, &0i128);
         env.storage()
             .persistent()
             .set(&DataKey::TotalDeposits, &0i128);
@@ -238,19 +234,16 @@ fn populate_positions(
 
 /// Run `get_cross_position_summary` and assert the return value is semantically
 /// correct for the given portfolio size.
-fn assert_summary_semantics(
-    env: &Env,
-    id: &Address,
-    user: &Address,
-    n_col: u32,
-    n_debt: u32,
-) {
+fn assert_summary_semantics(env: &Env, id: &Address, user: &Address, n_col: u32, n_debt: u32) {
     let summary = env.as_contract(id, || {
         LendingContract::get_cross_position_summary(env.clone(), user.clone())
     });
 
     if n_col == 0 && n_debt == 0 {
-        assert_eq!(summary.total_collateral_usd, 0, "empty: collateral must be 0");
+        assert_eq!(
+            summary.total_collateral_usd, 0,
+            "empty: collateral must be 0"
+        );
         assert_eq!(summary.total_debt_usd, 0, "empty: debt must be 0");
     } else if n_debt == 0 {
         assert!(
@@ -362,7 +355,10 @@ fn bench_empty_portfolio_returns_zero_values() {
         LendingContract::get_cross_position_summary(env.clone(), user.clone())
     });
 
-    assert_eq!(summary.total_collateral_usd, 0, "empty: collateral must be 0");
+    assert_eq!(
+        summary.total_collateral_usd, 0,
+        "empty: collateral must be 0"
+    );
     assert_eq!(summary.total_debt_usd, 0, "empty: debt must be 0");
 }
 

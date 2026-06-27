@@ -1,12 +1,13 @@
 use crate::{LendingContract, LendingContractClient, PauseType};
-use soroban_sdk::{
-    contract, contractimpl, vec,
-    testutils::Address as _,
-    Address, Bytes, Env,
-};
+use soroban_sdk::{contract, contractimpl, testutils::Address as _, vec, Address, Bytes, Env};
 
-
-fn setup() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
+fn setup() -> (
+    Env,
+    LendingContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -29,17 +30,19 @@ fn setup() -> (Env, LendingContractClient<'static>, Address, Address, Address) {
     // pause/emergency checks; thus we can set balances even without full
     // token accounting.
     env.storage()
-    //
+        //
         .persistent()
-        .set(
-            &(crate::DataKey::Treasury(asset.clone())),
-            &1_000_000i128,
-        );
+        .set(&(crate::DataKey::Treasury(asset.clone())), &1_000_000i128);
 
     (env, client, admin, user, receiver)
 }
 
-fn set_flash_pause(env: &Env, client: &LendingContractClient<'static>, admin: &Address, paused: bool) {
+fn set_flash_pause(
+    env: &Env,
+    client: &LendingContractClient<'static>,
+    admin: &Address,
+    paused: bool,
+) {
     let expires_at = env.ledger().sequence().saturating_add(5);
     client.set_pause(admin, &PauseType::FlashLoan, &paused, &expires_at);
 }
@@ -118,18 +121,13 @@ fn flash_loan_allowed_when_unpaused_and_normal_emergency_state() {
     // Seed treasury liquidity for this specific asset.
     env.storage()
         .persistent()
-        .set(
-            &(crate::DataKey::Treasury(asset.clone())),
-            &1_000_000i128,
-        );
+        .set(&(crate::DataKey::Treasury(asset.clone())), &1_000_000i128);
 
     // Fund receiver so repay_flash_loan can succeed.
-    env.storage()
-        .persistent()
-        .set(
-            &(crate::DataKey::Balance(asset.clone(), receiver_addr.clone())),
-            &0i128,
-        );
+    env.storage().persistent().set(
+        &(crate::DataKey::Balance(asset.clone(), receiver_addr.clone())),
+        &0i128,
+    );
 
     let params = Bytes::new(&env);
     client.flash_loan(&initiator, &receiver_addr, &asset, &10, &params);
@@ -176,4 +174,3 @@ impl FlashReceiverOk {
         lending.repay_flash_loan(&initiator, &asset, &total);
     }
 }
-

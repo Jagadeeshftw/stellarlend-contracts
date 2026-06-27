@@ -670,10 +670,7 @@ mod tests {
         // Then quotient = (i128::MAX - 1) / 2 = 9223372036854775807
         // product % c = 1, so we'd do quotient + 1 = 9223372036854775808 which fits
         // Actually let me just test a pathological case
-        assert_eq!(
-            checked_mul_div_ceil(i128::MAX, 1, 1).unwrap(),
-            i128::MAX
-        );
+        assert_eq!(checked_mul_div_ceil(i128::MAX, 1, 1).unwrap(), i128::MAX);
     }
 
     // ── split_interest_by_reserve_factor ─────────────────────────────────────
@@ -721,7 +718,10 @@ mod tests {
                     total,
                     "sum mismatch: total={total} rf={rf_bps} => depositor={d} reserve={r}"
                 );
-                assert!(d >= 0 && r >= 0, "negative split for total={total} rf={rf_bps}");
+                assert!(
+                    d >= 0 && r >= 0,
+                    "negative split for total={total} rf={rf_bps}"
+                );
             }
         }
     }
