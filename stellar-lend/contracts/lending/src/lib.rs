@@ -71,6 +71,8 @@ mod bad_debt_ledger_test;
 mod supply_rate_split_test;
 #[cfg(test)]
 mod repay_debt_floor_test;
+#[cfg(test)]
+mod position_summary_bench_test;
 
 use debt::{
     borrow_amount, cached_borrow_rate, effective_debt, load_debt, repay_amount, save_debt,
