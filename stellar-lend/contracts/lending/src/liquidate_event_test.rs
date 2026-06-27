@@ -11,6 +11,8 @@ fn setup_liquidatable() -> (
     Address,
     Address,
     Address,
+    Address,
+    Address,
 ) {
     let env = Env::default();
     env.mock_all_auths();
@@ -19,8 +21,10 @@ fn setup_liquidatable() -> (
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
     let liquidator = Address::generate(&env);
+    let debt_asset = Address::generate(&env);
+    let collateral_asset = Address::generate(&env);
     client.initialize(&admin);
-    (env, client, cid, user, liquidator)
+    (env, client, cid, user, liquidator, debt_asset, collateral_asset)
 }
 
 // ─── Standard liquidation event ──────────────────────────────────────────────
@@ -31,12 +35,12 @@ fn setup_liquidatable() -> (
 /// shortfall = 110-100 = 10
 #[test]
 fn liquidate_emits_event_with_correct_fields() {
-    let (env, client, cid, user, liquidator) = setup_liquidatable();
+    let (env, client, cid, user, liquidator, debt_asset, collateral_asset) = setup_liquidatable();
 
     client.deposit(&user, &100);
     client.borrow(&user, &200);
 
-    client.liquidate(&liquidator, &user, &150);
+    client.liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &150);
 
     assert_eq!(
         env.events().all(),
@@ -61,12 +65,12 @@ fn liquidate_emits_event_with_correct_fields() {
 /// shortfall = 0
 #[test]
 fn liquidate_event_close_factor_limits_repay() {
-    let (env, client, cid, user, liquidator) = setup_liquidatable();
+    let (env, client, cid, user, liquidator, debt_asset, collateral_asset) = setup_liquidatable();
 
     client.deposit(&user, &200);
     client.borrow(&user, &200);
 
-    client.liquidate(&liquidator, &user, &150);
+    client.liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &150);
 
     assert_eq!(
         env.events().all(),
@@ -93,12 +97,12 @@ fn liquidate_event_close_factor_limits_repay() {
 /// shortfall = 0
 #[test]
 fn liquidate_event_zero_shortfall() {
-    let (env, client, cid, user, liquidator) = setup_liquidatable();
+    let (env, client, cid, user, liquidator, debt_asset, collateral_asset) = setup_liquidatable();
 
     client.deposit(&user, &100);
     client.borrow(&user, &130);
 
-    client.liquidate(&liquidator, &user, &50);
+    client.liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &50);
 
     assert_eq!(
         env.events().all(),

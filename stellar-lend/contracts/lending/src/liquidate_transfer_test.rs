@@ -25,31 +25,30 @@ impl MockToken {
 
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
-        if env
+        let failed: Option<bool> = env
             .storage()
             .persistent()
-            .get::<bool, bool>(&(Symbol::new(&env, "fail_transfer"), from.clone()))
-            .unwrap_or(false)
-        {
+            .get(&(Symbol::new(&env, "fail_transfer"), from.clone()));
+        if failed.unwrap_or(false) {
             panic!("transfer failed");
         }
         let key = Symbol::new(&env, "balance");
         let from_balance: i128 = env
             .storage()
             .persistent()
-            .get(&(key, from.clone()))
+            .get(&(key.clone(), from.clone()))
             .unwrap_or(0);
         let to_balance: i128 = env
             .storage()
             .persistent()
-            .get(&(key, to.clone()))
+            .get(&(key.clone(), to.clone()))
             .unwrap_or(0);
         if from_balance < amount {
             panic!("insufficient balance");
         }
         env.storage()
             .persistent()
-            .set(&(key, from.clone()), &(from_balance - amount));
+            .set(&(key.clone(), from.clone()), &(from_balance - amount));
         env.storage()
             .persistent()
             .set(&(key, to), &(to_balance + amount));
@@ -66,7 +65,7 @@ impl MockToken {
         let balance: i128 = env
             .storage()
             .persistent()
-            .get(&(key, to.clone()))
+            .get(&(key.clone(), to.clone()))
             .unwrap_or(0);
         env.storage()
             .persistent()

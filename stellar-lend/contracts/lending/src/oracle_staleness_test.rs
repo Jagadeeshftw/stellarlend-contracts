@@ -180,7 +180,7 @@ fn liquidate_accepts_price_exactly_at_max_age() {
     client.borrow(&user, &90);
     advance_time(&env, DEFAULT_ORACLE_MAX_AGE_SECS);
 
-    assert_eq!(client.liquidate(&liquidator, &user, &45), 45);
+    assert_eq!(client.liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &45), 45);
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn liquidate_rejects_when_collateral_price_is_just_stale() {
     advance_time(&env, DEFAULT_ORACLE_MAX_AGE_SECS + 1);
     set_signed_price(&env, &client, &admin, &keypair, &debt_asset, 1_000);
 
-    let result = client.try_liquidate(&liquidator, &user, &45);
+    let result = client.try_liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &45);
     assert!(matches!(
         result,
         Err(Ok(LendingError::StaleOracleTimestamp))
@@ -220,7 +220,7 @@ fn liquidate_rejects_when_debt_price_is_just_stale() {
     advance_time(&env, DEFAULT_ORACLE_MAX_AGE_SECS + 1);
     set_signed_price(&env, &client, &admin, &keypair, &collateral_asset, 2_000);
 
-    let result = client.try_liquidate(&liquidator, &user, &45);
+    let result = client.try_liquidate(&liquidator, &user, &debt_asset, &collateral_asset, &45);
     assert!(matches!(
         result,
         Err(Ok(LendingError::StaleOracleTimestamp))

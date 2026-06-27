@@ -167,7 +167,7 @@ fn repay_with_multiple_overpays_verifies_debt_stays_zero() {
     let res = client.try_repay(&user, &100);
     // Contract might error on zero debt or cap it - both are valid
     // If it doesn't error, remaining should be 0
-    if let Ok(remaining) = res {
+    if let Ok(Ok(remaining)) = res {
         assert_eq!(remaining, 0, "Cannot reduce debt below zero");
     }
 }
