@@ -1355,6 +1355,8 @@ mod test_reentrancy;
 
 #[cfg(test)]
 mod amm_pause_integration_test;
+#[cfg(test)]
+mod claim_reserves_test;
 
 // mod governance_test;
 
